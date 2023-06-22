@@ -1,24 +1,27 @@
-import numpy
-import pandas as pd
 import torch
-import numpy as np
-#from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import TensorDataset, DataLoader
-import os
-import torchvision.transforms as T
-import csv
-import cv2
+#import torchvision.transforms as T
+import torchvision.transforms.transforms as T
 from torch.utils.data import Dataset
 from torchvision import transforms
 import torch.nn.functional as F
-from PIL import Image
 import torch.nn as nn
-from torch.optim import Adam
-import matplotlib.pyplot as plt
-import numpy as np
-from torch.autograd import Variable
 
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid())
 
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+    
 class Bottleneck(nn.Module):
     """
     __init__
@@ -39,6 +42,8 @@ class Bottleneck(nn.Module):
         self.bn3 = nn.BatchNorm2d(num_features=out_channel*self.expansion)
         self.relu = nn.ReLU(inplace=True)
 
+        # Add SEBlock
+        #self.seblock = SEBlock(out_channel*self.expansion)
         self.downsample = downsample
 
     def forward(self, x):
@@ -57,10 +62,14 @@ class Bottleneck(nn.Module):
         out = self.conv3(out)
         out = self.bn3(out)
 
+        # Apply SEBlock
+        #out = self.seblock(out)
+
         out += identity     # 残差连接0 n
         out = self.relu(out)
 
         return out
+
 
 class ResNet(nn.Module):
     """
@@ -89,12 +98,22 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block=block, channel=256, block_num=block_num[2], stride=2)  # H/2, W/2。downsample控制的shortcut，out_channel=256x4=1024
         self.layer4 = self._make_layer(block=block, channel=512, block_num=block_num[3], stride=2)  # H/2, W/2。downsample控制的shortcut，out_channel=512x4=2048
 
+        # Add SEBlocks after each residual block in the feature extraction layers
+        self.seblock1 = SEBlock(64 * block.expansion)
+        self.seblock2 = SEBlock(128 * block.expansion)
+        self.seblock3 = SEBlock(256 * block.expansion)
+        self.seblock4 = SEBlock(512 * block.expansion)
+
         self.avgpool = nn.AdaptiveAvgPool2d((1,1))  # 将每张特征图大小->(1,1)，则经过池化后的输出维度=通道数
-        self.fc1 = nn.Linear(in_features=512*block.expansion, out_features=512) #in=2048,out=1024
-        self.dropout = nn.Dropout(0.8) #dropout rate
-        self.fc2 = nn.Linear(in_features=512, out_features=128) #in=1024, out=1
-        self.fc3 = nn.Linear(in_features=128, out_features=num_classes) #in=512, out=1
+        self.fc1 = nn.Linear(in_features=512*block.expansion, out_features=1024) #in=2048,out=1024
+        self.dropout = nn.Dropout(0.6) #dropout rate
+        self.fc2 = nn.Linear(in_features=1024, out_features=512) #in=1024, out=1
+        self.fc3 = nn.Linear(in_features=512, out_features=num_classes) #in=512, out=1
         #self.fc4 = nn.Linear(in_features=64, out_features=num_classes) #in=128, out=1
+
+        # Upsampling layers for feature fusion
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        #self.upsample = nn.functional.interpolate(scale_factor=2, mode='bilinear', align_corners=True)
 
         for m in self.modules():    # 权重初始化
             if isinstance(m, nn.Conv2d):
@@ -122,21 +141,29 @@ class ResNet(nn.Module):
         x = self.relu(x)
         x = self.maxpool(x)
 
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x1 = self.layer1(x)
+        x1 = self.seblock1(x1)
+        x2 = self.layer2(x1)
+        x2 = self.seblock2(x2)
+        x3 = self.layer3(x2)
+        x3 = self.seblock3(x3)
+        x4 = self.layer4(x3)
+        x4 = self.seblock4(x4)
+        
+        # Upsample and fuse features
+        x3 = self.upsample(x4) + x3
+        x2 = self.upsample(x3) + x2
+        x1 = self.upsample(x2) + x1
 
-        x = self.avgpool(x)
+        x = self.avgpool(x1)
         x = torch.flatten(x, 1)
-        x = self.fc1(x)
-        x = self.sigmoid(x)
+        x = F.relu(self.fc1(x))
         x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.sigmoid(x)
+        x = F.relu(self.fc2(x))
         x = self.fc3(x)
-        return x
 
+        return x
+    
 def test(a):
     b=a+1
     return b
