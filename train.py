@@ -123,3 +123,13 @@ def train(num_epochs,device):
     plt.savefig('tranloss.png', dpi=1200) 
     end_time = time.process_time()
     print("Use time:", (end_time-start_time)/3600)
+
+def predict(model, device,dataloder):
+    Vdataiter=iter(dataloder)
+    vimg, vlabels = Vdataiter.next()
+    model.to(device)
+    with torch.no_grad():
+        vimg=vimg.to(device)
+        out = model(vimg)
+        #_, pre = torch.max(out.data, 1)
+        return out, vlabels
