@@ -83,7 +83,7 @@ class ModResdic(nn.Module):
         stride: 默认卷积步长
     """
     def __init__(self, block, block_num, num_classes, num_attention_heads=4):
-        super(ModResnet, self).__init__()
+        super(ModResdic, self).__init__()
         self.in_channel = 64    # conv1的输出维度
         self.conv1 = nn.Conv2d(in_channels=2, out_channels=self.in_channel, kernel_size=7, stride=2, padding=3, bias=False)     # H/2,W/2。C:3->64
         self.bn1 = nn.BatchNorm2d(self.in_channel)
@@ -148,7 +148,7 @@ class ModResdic(nn.Module):
         x = self.maxpool(x)
 
         x1 = self.layer1(x)
-        #x1 = self.fusion1(x1)
+        x1 = self.fusion1(x1)
         #x1 = self.seblock1(x1)
         x2 = self.layer2(x1)
         #x2 = self.seblock2(x2)
@@ -158,7 +158,7 @@ class ModResdic(nn.Module):
         #x3 = self.fusion3(x3)
         x4 = self.layer4(x3)
         #x4 = self.seblock4(x4)
-        #x4 = self.fusion4(x4)
+        x4 = self.fusion4(x4)
 
 
         x = self.avgpool(x4)
@@ -233,10 +233,10 @@ class ModResv1(nn.Module):
         self.seblock3 = SEBlock(256 * block.expansion)
         self.seblock4 = SEBlock(512 * block.expansion)
 
-        self.fusion4 = MultiScaleFusion(512 * block.expansion, 512 * block.expansion)
-        #self.fusion3 = MultiScaleFusion(256 * block.expansion, 256 * block.expansion)
-        #self.fusion2 = MultiScaleFusion(128 * block.expansion, 128 * block.expansion)
-        self.fusion1 = MultiScaleFusion(64 * block.expansion, 64 * block.expansion)
+        self.fusion4 = MultiScaleFusion(512 * block.expansion)
+        #self.fusion3 = MultiScaleFusion(256 * block.expansion)
+        #self.fusion2 = MultiScaleFusion(128 * block.expansion)
+        self.fusion1 = MultiScaleFusion(64 * block.expansion)
 
 
         self.avgpool = nn.AdaptiveAvgPool2d((1,1))  # 将每张特征图大小->(1,1)，则经过池化后的输出维度=通道数
@@ -278,7 +278,7 @@ class ModResv1(nn.Module):
 
         x1 = self.layer1(x)
         #x1 = self.seblock1(x1)
-        x1 = self.fusion1(x1)
+        #x1 = self.fusion1(x1)
         x2 = self.layer2(x1)
         x2 = self.seblock2(x2)
         x3 = self.layer3(x2)

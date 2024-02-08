@@ -27,7 +27,7 @@ def testAccuracy():
     vmse = np.mean((y - x) ** 2)
     return(r2,preloss,vmse)
 
-def train(num_epochs,device):
+def train(num_epochs,device,net):
     import time
     start_time = time.process_time()
     best_accuracy = 0.0
