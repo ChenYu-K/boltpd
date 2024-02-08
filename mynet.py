@@ -69,7 +69,7 @@ class Bottleneck(nn.Module):
         return out
 
 
-class ModResnet(nn.Module):
+class ModResdic(nn.Module):
     """
     __init__
         block: 堆叠的基本模块
@@ -83,9 +83,8 @@ class ModResnet(nn.Module):
         stride: 默认卷积步长
     """
     def __init__(self, block, block_num, num_classes, num_attention_heads=4):
-        super(ResNet, self).__init__()
+        super(ModResnet, self).__init__()
         self.in_channel = 64    # conv1的输出维度
-
         self.conv1 = nn.Conv2d(in_channels=2, out_channels=self.in_channel, kernel_size=7, stride=2, padding=3, bias=False)     # H/2,W/2。C:3->64
         self.bn1 = nn.BatchNorm2d(self.in_channel)
         self.relu = nn.ReLU(inplace=True)
@@ -200,7 +199,102 @@ class MultiScaleFusion(nn.Module):
         return out
     
 
+class ModResv1(nn.Module):
+    """
+    __init__
+        block: 堆叠的基本模块
+        block_num: 基本模块堆叠个数,是一个list,对于resnet50=[3,4,6,3]
+        num_classes: 全连接之后的分类特征维度
 
+    _make_layer
+        block: 堆叠的基本模块
+        channel: 每个stage中堆叠模块的第一个卷积的卷积核个数，对resnet50分别是:64,128,256,512
+        block_num: 当期stage堆叠block个数
+        stride: 默认卷积步长
+    """
+    def __init__(self, block, block_num, num_classes):
+        super(ModResv1, self).__init__()
+        self.in_channel = 64    # conv1的输出维度
+
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=self.in_channel, kernel_size=7, stride=2, padding=3, bias=False)     # H/2,W/2。C:3->64
+        self.bn1 = nn.BatchNorm2d(self.in_channel)
+        self.relu = nn.ReLU(inplace=True)
+        self.activation = nn.LeakyReLU(negative_slope=0.01)
+        self.sigmoid = nn.Sigmoid()
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)     # H/2,W/2。C不变
+        self.layer1 = self._make_layer(block=block, channel=64, block_num=block_num[0], stride=1)   # H,W不变。downsample控制的shortcut，out_channel=64x4=256
+        self.layer2 = self._make_layer(block=block, channel=128, block_num=block_num[1], stride=2)  # H/2, W/2。downsample控制的shortcut，out_channel=128x4=512
+        self.layer3 = self._make_layer(block=block, channel=256, block_num=block_num[2], stride=2)  # H/2, W/2。downsample控制的shortcut，out_channel=256x4=1024
+        self.layer4 = self._make_layer(block=block, channel=512, block_num=block_num[3], stride=2)  # H/2, W/2。downsample控制的shortcut，out_channel=512x4=2048
+
+        # Add SEBlocks after each residual block in the feature extraction layers
+        self.seblock1 = SEBlock(64 * block.expansion)
+        self.seblock2 = SEBlock(128 * block.expansion)
+        self.seblock3 = SEBlock(256 * block.expansion)
+        self.seblock4 = SEBlock(512 * block.expansion)
+
+        self.fusion4 = MultiScaleFusion(512 * block.expansion, 512 * block.expansion)
+        #self.fusion3 = MultiScaleFusion(256 * block.expansion, 256 * block.expansion)
+        #self.fusion2 = MultiScaleFusion(128 * block.expansion, 128 * block.expansion)
+        self.fusion1 = MultiScaleFusion(64 * block.expansion, 64 * block.expansion)
+
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))  # 将每张特征图大小->(1,1)，则经过池化后的输出维度=通道数
+        self.fc1 = nn.Linear(in_features=512*block.expansion, out_features=1024) #in=2048,out=1024
+        self.dropout = nn.Dropout(0.8) #dropout rate
+        self.fc2 = nn.Linear(in_features=1024, out_features=1) #in=1024, out=1
+        #self.fc3 = nn.Linear(in_features=512, out_features=num_classes) #in=512, out=1
+        #self.fc4 = nn.Linear(in_features=64, out_features=num_classes) #in=128, out=1
+
+        # Upsampling layers for feature fusion
+        self.upsample = lambda x: nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=None).to(x.device)
+        #self.upsample = nn.functional.interpolate(scale_factor=2, mode='bilinear', align_corners=True)
+        
+        for m in self.modules():    # 权重初始化
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+
+    def _make_layer(self, block, channel, block_num, stride=1):
+        downsample = None   # 用于控制shorcut路的
+        if stride != 1 or self.in_channel != channel*block.expansion:   # 对resnet50：conv2中特征图尺寸H,W不需要下采样/2，但是通道数x4，因此shortcut通道数也需要x4。对其余conv3,4,5，既要特征图尺寸H,W/2，又要shortcut维度x4
+            downsample = nn.Sequential(
+                nn.Conv2d(in_channels=self.in_channel, out_channels=channel*block.expansion, kernel_size=1, stride=stride, bias=False), # out_channels决定输出通道数x4，stride决定特征图尺寸H,W/2
+                nn.BatchNorm2d(num_features=channel*block.expansion))
+
+        layers = []  # 每一个convi_x的结构保存在一个layers列表中，i={2,3,4,5}
+        layers.append(block(in_channel=self.in_channel, out_channel=channel, downsample=downsample, stride=stride)) # 定义convi_x中的第一个残差块，只有第一个需要设置downsample和stride
+        self.in_channel = channel*block.expansion   # 在下一次调用_make_layer函数的时候，self.in_channel已经x4
+
+        for _ in range(1, block_num):  # 通过循环堆叠其余残差块(堆叠了剩余的block_num-1个)
+            layers.append(block(in_channel=self.in_channel, out_channel=channel))
+
+        return nn.Sequential(*layers)   # '*'的作用是将list转换为非关键字参数传入
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x1 = self.layer1(x)
+        #x1 = self.seblock1(x1)
+        x1 = self.fusion1(x1)
+        x2 = self.layer2(x1)
+        x2 = self.seblock2(x2)
+        x3 = self.layer3(x2)
+        x3 = self.seblock3(x3)
+        x4 = self.layer4(x3)
+        x4 = self.seblock4(x4)
+        #x4 = self.fusion4(x4)
+
+        x = self.avgpool(x4)
+        x = torch.flatten(x, 1)
+        x = self.activation(self.fc1(x))
+        x = self.dropout(x)
+        #x = self.activation(self.fc2(x))
+        x = self.fc2(x)
+
+        return x
 
 class ResNet(nn.Module):
     """
